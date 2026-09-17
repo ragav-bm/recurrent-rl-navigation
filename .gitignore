@@ -1,0 +1,45 @@
+# Python Bytecode & Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Virtual Environments
+.venv/
+venv/
+env/
+
+# Training Logs, Checkpoints & Large Artifacts
+runs/*
+!runs/.gitkeep
+*.log
+*.sqlite
+mlflow.db
+mlruns/
+models/sac_lstm_checkpoints/
+models/*.pth
+results/*.csv
+results/*.png
+
+# Keep models and runs directory structure tracked
+!models/.gitkeep
+!runs/.gitkeep
+
+# ROS 2 Colcon Build Directories
+build/
+install/
+log/
+
+# IDE and Editor Cache
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Temporary files
+/tmp/
+*.tmp
+

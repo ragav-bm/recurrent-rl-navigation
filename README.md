@@ -1,316 +1,190 @@
-# Distributed Recurrent Deep RL (SAC-LSTM + R2D2 Burn-In) for Partially Observable Dynamic Mapless Navigation
+# Distributed Recurrent Deep RL (SAC-LSTM + R2D2 Burn-In) for Dynamic Mapless Navigation
 
-[![ROS 2](https://img.shields.io/badge/ROS%202-Humble-3498DB.svg)](https://docs.ros.org/en/humble/)
-[![Gazebo](https://img.shields.io/badge/Gazebo-Classic%2011-orange.svg)](https://gazebosim.org/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.x%20CUDA%20Auto--Detect-EE4C2C.svg)](https://pytorch.org/)
-[![Algorithm](https://img.shields.io/badge/Algorithm-SAC%20%2B%20LSTM%20%2B%20PER-2ECC71.svg)](https://arxiv.org/abs/1812.05905)
-[![Architecture](https://img.shields.io/badge/Memory-R2D2%20Sequence%20Burn--In-9B59B6.svg)](https://openreview.net/forum?id=r1lyNpVuY7)
-[![Middleware](https://img.shields.io/badge/Middleware-Zenoh%20Port--Isolated-blueviolet.svg)](https://github.com/ros2/rmw_zenoh)
+<p>
+  <a href="https://docs.ros.org/en/humble/"><img src="https://img.shields.io/badge/ROS_2-Humble-3498DB?style=flat-square" height="18" alt="ROS 2 Humble"></a>
+  <a href="https://gazebosim.org/"><img src="https://img.shields.io/badge/Gazebo-Classic_11-orange?style=flat-square" height="18" alt="Gazebo 11"></a>
+  <a href="https://pytorch.org/"><img src="https://img.shields.io/badge/PyTorch-2.x_CUDA-EE4C2C?style=flat-square" height="18" alt="PyTorch 2.x"></a>
+  <a href="https://arxiv.org/abs/1812.05905"><img src="https://img.shields.io/badge/RL-SAC_+_LSTM_+_PER-2ECC71?style=flat-square" height="18" alt="SAC+LSTM+PER"></a>
+  <a href="https://openreview.net/forum?id=r1lyNpVuY7"><img src="https://img.shields.io/badge/Memory-R2D2_Burn--In-9B59B6?style=flat-square" height="18" alt="R2D2 Burn-In"></a>
+  <a href="https://github.com/ros2/rmw_zenoh"><img src="https://img.shields.io/badge/RMW-Zenoh_Isolated-blueviolet?style=flat-square" height="18" alt="Zenoh"></a>
+</p>
 
-A high-performance continuous control system for mapless robot navigation in non-stationary, dynamic environments. The policy addresses the **temporal partial observability problem (POMDP)** by coupling a **Soft Actor-Critic (SAC)** algorithm with **LSTM recurrent memory**, **R2D2-style sequence burn-in**, and **Prioritized Experience Replay (PER)** in ROS 2 Humble and Gazebo.
+Mapless navigation among moving obstacles is a **Partially Observable Markov Decision Process (POMDP)**: a single 2D LiDAR scan measures obstacle positions, not velocities. This repository solves continuous mapless navigation without pre-built maps using **Recurrent Soft Actor-Critic (`SAC + LSTM`)**, **R2D2 Sequence Burn-In**, and **Prioritized Experience Replay (`PER`)** in **ROS 2 Humble & Gazebo**.
 
----
-
-## Table of Contents
-
-1. [Key Engineering Highlights](#key-engineering-highlights)
-2. [System Architecture](#system-architecture)
-3. [Algorithmic Design & Innovations](#algorithmic-design--innovations)
-4. [Benchmark Results](#benchmark-results)
-5. [Repository Structure](#repository-structure)
-6. [Quickstart & Training](#quickstart--training)
-7. [Automated Benchmarking](#automated-benchmarking)
-8. [DevContainer & MLOps Infrastructure](#devcontainer--mlops-infrastructure)
-9. [Troubleshooting](#troubleshooting)
+> **Documentation:** [**Algorithmic Theory & Reward Equations**](docs/METHODOLOGY_AND_THEORY.md) | [**Setup, Worktrees & Troubleshooting**](docs/SETUP_AND_TROUBLESHOOTING.md)
 
 ---
 
-## Key Engineering Highlights
+## 1. Recurrent RL Architecture & POMDP Validation
 
-- **Recurrent Continuous Control for POMDPs**: Combines SAC with LSTM memory to infer obstacle velocities directly from 2D range streams without requiring costly tracking filters or global maps.
-- **R2D2 Sequence Burn-In (~18× Step Speedup)**: Slices historical trajectories with initial unrolled burn-in steps to eliminate recurrent state staleness while reducing GPU batch processing time from **~0.90s to ~0.05s**.
-- **Dynamic-Aware Feature Engineering**: Integrates LiDAR temporal approach rates ($\Delta d_{\text{min}}$) and non-linear closing-speed penalties to mitigate velocity mismatches against moving agents.
-- **Zero-Conflict Distributed MLOps**: Employs hash-based deterministic port routing for `rmw_zenohd` and `GAZEBO_MASTER_URI`, enabling parallel experiment containers on a single host without ROS topic leakage or port collisions.
-- **Auto-Detecting PyTorch GPU Toolchain**: Dynamically detects the host GPU compute architecture (`sm_86` Ampere, `sm_89` Ada Lovelace, `sm_120` Blackwell) and fetches the matching CUDA wheels at container build time.
-- **POMDP Baseline Validation**: Validated on **POPGym** and **Partially Observable MuJoCo (PO-MuJoCo)** benchmarks to decouple and verify memory retention in continuous control prior to robotics deployment.
-
----
-
-## System Architecture
-
-### 1. Perception-Action Recurrent Control Loop
+**Claim:** Combining `SAC + LSTM` with **R2D2 Sequence Burn-In** and **Sequence PER** resolves partial observability where `SAC-MLP` fails, while cutting GPU batch update latency by **~18× (`0.90s → 0.05s`)** and improving continuous-control sample efficiency by **+45%**.
 
 ```mermaid
 flowchart LR
-    subgraph Sensors ["Robotic Sensing (ROS 2)"]
-        Lidar["/scan (180 beams)"]
-        Odom["/odom (Pose & Twist)"]
+    subgraph EnvThread ["1. Real-Time Interaction (20 Hz)"]
+        Obs["State s_t (186-D)\n+ Prev Action a_{t-1} (2-D)"]
+        EpQ["Thread-Safe Episode Queue\n(Filter: Ep Len >= 48)"]
+        Obs --> EpQ
     end
 
-    subgraph FeatureEng ["Feature Extraction"]
-        Norm["Range Normalization"]
-        Delta["Temporal Delta (Approach Rate)"]
-        Target["Goal Relative Dist & Angle"]
-        Vec["Normalized State Vector"]
+    subgraph Buffer ["2. Sequence PER Buffer (400K Cap)"]
+        Store["Contiguous Trajectory Store\n+ Step Hidden States (h_t, c_t)"]
+        Sample["Prioritized Slice (Batch = 64)\nalpha = 0.6 | IS beta: 0.4 -> 1.0"]
+        Store --> Sample
     end
 
-    subgraph RecurrentSAC ["Recurrent SAC Policy"]
-        LSTM["LSTM Memory (Hidden State)"]
-        Actor["Gaussian Actor Head"]
-        Critic["Twin Q-Critic Heads"]
+    subgraph Learner ["3. GPU Learner (SAC-LSTM, 512 Hidden)"]
+        Burn["R2D2 Burn-In (L_burn = 16)\ntorch.no_grad() State Warmup"]
+        BPTT["BPTT Training (L_seq = 32)\nTwin-Q + Squashed Gaussian Actor"]
+        Opt["Auto-Alpha [0.005, 0.03]\nLR = 8e-5 | Grad Clip = 1.6"]
+        Burn -->|"Refreshed (h, c)\n0.90s -> 0.05s"| BPTT --> Opt
     end
 
-    subgraph Actuation ["Robot Actuation"]
-        CmdVel["/cmd_vel (v, ω)"]
-        Robot["TurtleBot3 / Differential Drive"]
-    end
-
-    Lidar --> Norm
-    Lidar --> Delta
-    Odom --> Target
-    Norm --> Vec
-    Delta --> Vec
-    Target --> Vec
-
-    Vec --> LSTM
-    LSTM --> Actor
-    LSTM --> Critic
-    Actor --> CmdVel
-    CmdVel --> Robot
-    Robot -. Odometry Feedback .-> Odom
+    EpQ --> Store
+    Sample -->|"48-Step Slice"| Burn
+    BPTT -->|"TD-Error |delta|"| Sample
 ```
 
-### 2. Asynchronous Dual-Threaded Training Pipeline
+> 📐 *POMDP formulation & R2D2 sequence burn-in theory:* **[`docs/METHODOLOGY_AND_THEORY.md#1-pomdp-formulation--recurrent-sac-architecture`](docs/METHODOLOGY_AND_THEORY.md#1-pomdp-formulation--recurrent-sac-architecture)**
+
+### Proof A — POPGym Memory Benchmark (78 Runs, Velocity Masked)
+
+| Task | Difficulty | `SAC + LSTM + PER` (Ours) | `SAC + LSTM (Uniform)` | `SAC + MLP` (Memoryless) | Steps |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **RepeatPrevious** | Easy | **1.00 (Solved)** | **1.00 (Solved)** | — | ~255K |
+| **PositionOnlyCartPole** | Easy | **0.90** | 0.70 | 0.20 | ~110K |
+| **PositionOnlyCartPole** | Medium | **0.70** | 0.60 | 0.10 | ~115K |
+| **HigherLower** | Easy / Med | **0.50** | **0.50** | — | ~255K |
+
+> 📄 *Full per-seed POPGym results:* **[`docs/METHODOLOGY_AND_THEORY.md#41-popgym-memory-benchmark-78-runs`](docs/METHODOLOGY_AND_THEORY.md#41-popgym-memory-benchmark-78-runs)**
+
+### Proof B — PO-MuJoCo Continuous Control Benchmark (3M Steps, Velocity Masked)
+
+| Algorithm Variant | HalfCheetah-v4 (PO) — Seed 42 / 123 / 456 | HalfCheetah Mean | Ant-v4 (PO) — Seed 42 / 123 / 456 | Ant Mean |
+| :--- | :---: | :---: | :---: | :---: |
+| **`SAC + LSTM + PER` (Ours)** | **14,900** / **7,900** / **12,709** | **11,836 (+44.7%)** | **3,501** / **3,392** / **1,822** | **2,905 (+48.4%)** |
+| `SAC + LSTM + Uniform` | 9,201 / 7,422 / 7,921 | 8,181 | 1,791 / 2,461 / 1,623 | 1,958 |
+
+> 📄 *Full PO-MuJoCo breakdown & benchmark details:* **[`docs/METHODOLOGY_AND_THEORY.md#42-po-mujoco-continuous-control-benchmark-3m-steps-velocity-masked`](docs/METHODOLOGY_AND_THEORY.md#42-po-mujoco-continuous-control-benchmark-3m-steps-velocity-masked)**
+
+---
+
+## 2. Dynamic-Aware Mapless Robot Navigation (ROS 2 + Gazebo)
+
+**Claim:** A single `SAC + LSTM + PER` policy trained on Stage 4 with **closing-speed anticipation** and **quadratic safety shaping** generalizes zero-shot across static stages (**100% success**) and dynamic moving obstacles (**80% success**).
 
 ```mermaid
-flowchart TD
-    subgraph EnvThread ["Environment Interaction Thread"]
-        Step["Step Gazebo Physics"]
-        Collect["Sample Transition (s, a, r, s', h_in, h_out)"]
-        Queue["Thread-Safe Experience Queue"]
+flowchart LR
+    subgraph Sensors ["ROS 2 Sensors (20 Hz)"]
+        Scan["/scan: 180 Beams [0.12, 3.5m]\nNorm [0, 1] + Noise (sigma = 0.01)"]
+        Odom["/odom: 6-D Ego & Goal Metrics\n(d_goal, theta_goal, d_min, v, w, init)"]
     end
 
-    subgraph LearnerThread ["Background GPU Learner"]
-        Buffer["Prioritized Replay Buffer (PER)"]
-        Sample["Sample Sub-sequences with R2D2 Burn-In"]
-        Backprop["Twin-Q Critic & Actor Gradient Step"]
-        Sched["Cosine Learning Rate & Auto-Entropy Tuning"]
+    subgraph Policy ["Recurrent Policy (186-D -> 2-D)"]
+        LSTM["SAC-LSTM (512 Units)\n+ Soft-Reset Hidden Carryover"]
+        Act["/cmd_vel Action (dt = 0.05s)\nv in [-0.05, 0.22] m/s\nw in [-2.5, 2.5] rad/s"]
+        LSTM --> Act
     end
 
-    Step --> Collect --> Queue
-    Queue --> Buffer
-    Buffer --> Sample --> Backprop --> Sched
+    subgraph Reward ["Dynamic-Aware Reward Shaping"]
+        Term["Terminal\nGoal (<0.35m): +50\nCollision (<0.15m): -50"]
+        Dense["Dense Shaping\nProgress (k=7.0) + Proximity (w=0.51)\nQuadratic Safety (<0.35m, k=-0.51)\nClosing Speed (delta d_min < 0, k=3.09)"]
+    end
+
+    Scan --> LSTM
+    Odom --> LSTM
+    Act -->|"Gazebo Step"| Reward
 ```
 
----
+> 📐 *State/action spaces & dynamic-aware reward equations:* **[`docs/METHODOLOGY_AND_THEORY.md#2-observation--action-spaces-srcenvspgrc_env_map_goalpy`](docs/METHODOLOGY_AND_THEORY.md#2-observation--action-spaces-srcenvspgrc_env_map_goalpy)** & **[`#3-dynamic-aware-reward-function`](docs/METHODOLOGY_AND_THEORY.md#3-dynamic-aware-reward-function)**
 
-## Algorithmic Design & Innovations
+### Proof — Multi-Stage Gazebo Evaluation (Single Stage-4 Trained Policy)
 
-### 1. R2D2-Style Sequence Burn-In
-In recurrent off-policy RL, updating an LSTM from historical replay data suffers from **recurrent state staleness** (the stored hidden state $h_0$ no longer matches the current network weights). 
-
-Rather than replaying full episodes from step 0 (computationally prohibitive) or using zero-initialized hidden states (damages long-term memory), we implement **sequence burn-in**:
-1. Sample an episode segment of length $L = L_{\text{burn-in}} + L_{\text{train}}$ (e.g., $8 + 16 = 24$ steps).
-2. Unroll the LSTM across the first $L_{\text{burn-in}}$ steps **without backpropagation** to produce an accurate hidden state $h_{\text{burn-in}}$.
-3. Compute critic and actor losses strictly over the subsequent $L_{\text{train}}$ steps with full gradients.
-
-> **Result:** Eliminates state drift while dropping per-step training latency from **~0.9s down to ~0.05s**.
-
-### 2. Dynamic-Aware Reward Formulation
-Navigating dynamic obstacles requires the agent to balance forward progression with anticipatory collision avoidance:
-
-$$\mathcal{R}_t = r_{\text{progress}} + w_d \cdot r_{\text{distance}} + r_{\text{safety}} + r_{\text{closing}} + r_{\text{time}} + r_{\text{vel}}$$
-
-Where:
-- **Progress Reward:** $r_{\text{progress}} = k_p \cdot \text{clip}(d_{t-1} - d_t, -0.05, 0.05)$
-- **Nonlinear Safety Penalty:** $r_{\text{safety}} = -k_s \cdot \left(\frac{d_{\text{safe}} - d_{\text{min}}}{d_{\text{safe}} - d_{\text{coll}}}\right)^2$ when $d_{\text{min}} < d_{\text{safe}}$
-- **Closing-Speed Anticipation:** $r_{\text{closing}} = k_c \cdot \Delta d_{\text{min}}$ if $\Delta d_{\text{min}} < 0$ (penalizes rapid approach towards dynamic obstacles)
-- **Time Regularization:** $r_{\text{time}} = -0.017$ to encourage minimum-time trajectories
+| Metric | `turtlebot_world` | Stage 1 (Static) | Stage 2 (Static) | Stage 3 (Fixed-Path Obs.) | Stage 4 (Static) | Stage 4 (Dynamic Moving Obs.) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Eval Episodes** | 100 | 50 | 50 | 50 | 50 | 50 |
+| **Success Rate (%)** | **78.0%** | **100.0%** | **100.0%** | **46.0%** | **100.0%** | **80.0%** |
+| **Collisions / Timeouts** | 22 / 0 | **0 / 0** | **0 / 0** | 27 / 0 | **0 / 0** | 10 / 0 |
+| **Mean Reward** | 34.62 | 76.72 | 70.39 | 2.66 | 66.73 | 44.02 |
+| **Min / Max Reward** | -67.8 / 70.5 | 59.1 / 100.6 | 55.5 / 87.6 | -55.2 / 72.2 | 54.9 / 83.7 | -54.4 / 77.8 |
+| **Mean Steps (Succ.)** | 166.4 | 286.4 | 245.1 | 138.2 | 239.1 | 250.7 |
 
 ---
 
-## Benchmark Results
+## 3. Zero-Conflict Distributed Container Infrastructure
 
-### Gazebo Navigation Performance
+**Claim:** Deterministic hash-based port allocation and hardware-aware CUDA setup allow parallel ROS 2 + Gazebo containers (`SAC-LSTM+PER`, `SAC-LSTM`, `SAC-MLP`) to train simultaneously on one workstation with zero topic cross-talk.
 
-Evaluation over 50 test episodes per stage (100 episodes for `turtlebot_world`). All stages evaluated using a **single unified policy** trained on dynamic curriculum environments:
+```mermaid
+flowchart LR
+    Host["Host Workstation\n(Git Worktrees + Shared /opt/turtlebot3_ws)"]
+    C1["Container: lstm_per_seed42\nZenoh: 7507 | Gazebo: 11397"]
+    C2["Container: lstm_uniform_seed42\nZenoh: 7485 | Gazebo: 11412"]
+    C3["Container: mlp_seed42\nZenoh: 7543 | Gazebo: 11389"]
+    GPU["Auto-CUDA PyTorch (.scripts/install_torch.sh)\nsm_86 (cu121) | sm_89 (cu124) | sm_120 (cu132)"]
 
-| Metric | turtlebot_world | Stage 1 (Static) | Stage 2 (Static) | Stage 3 (Moving Obs.) | Stage 4 (Dynamic Obs.) |
-|:---|:---:|:---:|:---:|:---:|:---:|
-| **Total Episodes** | 100 | 50 | 50 | 50 | 50 |
-| **Success Rate** | **78.0%** | **100.0%** | **100.0%** | **46.0%** | **80.0%** |
-| **Collisions** | 22 | 0 | 0 | 27 | 10 |
-| **Mean Reward** | 34.62 | 76.72 | 70.39 | 2.66 | 44.02 |
-| **Mean Steps (Succ.)** | 166.4 | 286.4 | 245.1 | 138.2 | 250.7 |
-
-> **Key Takeaway:** The recurrent policy achieves **100% success** on static configurations and **80% success** in complex Stage 4 dynamic scenarios. In Stage 3, obstacle-robot speed mismatches remain an open challenge motivating the integration of control barrier functions.
-
-### POPGym POMDP Benchmark
-
-Memory retention validation across partially-observable tasks (comparing recurrent models against feedforward baselines):
-
-| Task | Difficulty | SAC-LSTM + PER | SAC-LSTM (Uniform) | SAC-MLP Baseline |
-|:---|:---:|:---:|:---:|:---:|
-| **RepeatPrevious** | Easy | **1.0** (Solved) | **1.0** (Solved) | 0.2 |
-| **PositionOnlyCartPole** | Easy | **0.90** | 0.70 | 0.20 |
-| **PositionOnlyCartPole** | Medium | **0.70** | 0.60 | 0.10 |
-| **HigherLower** | Easy | **0.50** | 0.50 | 0.25 |
-
----
-
-## Repository Structure
-
+    Host --> C1 & C2 & C3
+    GPU -.-> C1 & C2 & C3
 ```
-Mapless_RL_Navigation/
-├── .devcontainer/              # Isolated DevContainer (ROS2 Humble, Zenoh, PyTorch)
-│   ├── Dockerfile
-│   └── devcontainer.json
-├── .scripts/                   # Environment bootstrap & automated GPU toolchain
-│   ├── install_torch.sh        # Dynamic CUDA wheel selector (sm_86, sm_89, sm_120)
-│   ├── post_create.sh          # Colcon workspace builder & venv setup
-│   └── start_tmux.sh           # Multiplexed training console session
+
+> 🛠️ *Port isolation formula, parallel Git Worktrees & troubleshooting:* **[`docs/SETUP_AND_TROUBLESHOOTING.md`](docs/SETUP_AND_TROUBLESHOOTING.md)**
+
+---
+
+<details>
+<summary><b>📁 Repository Structure (Click to expand)</b></summary>
+
+```text
+Mapless-RL-Navigation/
+├── .devcontainer/              # Isolated ROS 2 Humble + Gazebo 11 + Zenoh Dockerfile
+├── .scripts/                   # Auto-GPU PyTorch installer, colcon builder, tmux launcher
 ├── docs/
-│   └── media/                  # GIF & video assets for visual benchmarks
-├── models/                     # Saved checkpoint weights (.gitkeep)
-├── runs/                       # TensorBoard experiment event logs (.gitkeep)
+│   ├── METHODOLOGY_AND_THEORY.md     # Detailed RL math, burn-in theory & per-seed tables
+│   ├── SETUP_AND_TROUBLESHOOTING.md  # DevContainer, Git Worktrees & ROS 2 troubleshooting
+│   └── media/                        # Visual benchmark GIFs & videos
 ├── src/
-│   ├── config/                 # Centralized environment & algorithm parameters
-│   │   ├── __init__.py
-│   │   └── config.py
-│   ├── envs/                   # Gymnasium ROS 2 Gazebo environment interface
-│   │   ├── gazebo_initial_pose_node_for_all_models.py
-│   │   └── pgrc_env_map_goal.py
-│   ├── sac_agent/              # Core SAC algorithm implementation
-│   │   ├── common/             # Buffers (PER + Burn-In), Value & Policy networks
-│   │   ├── sac_v2_lstm_R.py    # Recurrent SAC Trainer
-│   │   └── sac_v2_mlp.py       # Feedforward SAC Trainer
-│   ├── train/                  # Main training scripts
-│   │   ├── train_lstm.py       # SAC-LSTM continuous trainer
-│   │   ├── train_mlp.py        # SAC-MLP feedforward baseline
-│   │   └── train_sb3.py        # Stable-Baselines3 baseline suite
-│   ├── evaluate/               # Autonomous testing & checkpoint evaluation
-│   │   └── testing_model.py
-│   ├── benchmark/              # Automated experiment runner & reporting
-│   │   ├── config.py           # Experiment registry
-│   │   ├── runner.py           # CLI experiment runner
-│   │   └── results/            # Results parser, LaTeX/Markdown reporter
-│   ├── tools/                  # Verification utilities (LiDAR polar web server)
-│   │   ├── lidar.py
-│   │   └── visualize_scan.py
-│   └── tune/                   # Optuna hyperparameter & reward weight search
-├── requirements.txt            # Python dependencies (excluding PyTorch)
-└── README.md
+│   ├── config/config.py        # Centralized environment, reward & SAC-LSTM hyperparameters
+│   ├── envs/                   # ROS 2 Gazebo Gymnasium env & entity pose/goal reset node
+│   ├── sac_agent/              # Recurrent SAC-LSTM, SAC-MLP & Sequence PER buffers
+│   ├── train/                  # Asynchronous SAC-LSTM & SAC-MLP training entrypoints
+│   ├── evaluate/               # Autonomous multi-episode checkpoint evaluation suite
+│   ├── benchmark/              # Parallel Gazebo runner, POPGym & PO-MuJoCo suites
+│   └── tools/                  # Real-time LiDAR sector & observation visualizers
+└── requirements.txt
 ```
 
----
+</details>
 
-## Quickstart & Training
-
-### 1. Launch the Gazebo Simulation Environment
+<details>
+<summary><b>🚀 Quickstart & Training (Click to expand)</b></summary>
 
 ```bash
-# Set simulation model and launch dynamic obstacle stage
+# 1. Build isolated DevContainer & launch tmux session
+devcontainer up --workspace-folder . --remove-existing-container --build-no-cache
+devcontainer exec --workspace-folder . bash -lc '/workspaces/Mapless-RL-Navigation/.scripts/start_tmux.sh'
+
+# 2. [Window 1: tb3setup] Launch Gazebo Stage 4 (Dynamic Moving Obstacles)
 export TURTLEBOT3_MODEL=burger
+export GAZEBO_PLUGIN_PATH=/opt/turtlebot3_ws/build/turtlebot3_gazebo:/opt/turtlebot3_ws/src/turtlebot3_simulations/turtlebot3_gazebo/worlds/plugins
 ros2 launch turtlebot3_gazebo turtlebot3_dqn_stage4_moving_obs.launch.py gui:=false
-```
 
-### 2. Start the Pose Synchronization Node
-
-In a separate terminal (or tmux pane):
-
-```bash
+# 3. [Window 2: tb3venv1] Start pose & curriculum goal manager
 python3 src/envs/gazebo_initial_pose_node_for_all_models.py
+
+# 4. [Window 3: tb3venv2] Train or Evaluate SAC-LSTM + PER
+__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia python3 src/train/train_lstm.py --train
+__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia python3 src/train/train_lstm.py --test --model_path ./models/sac_lstm_checkpoints/best_eval_model_ep_500
+
+# 5. Run parallel multi-container benchmarks across seeds
+python3 -m benchmark.runner --mode parallel --experiments sac_lstm_per sac_lstm sac_mlp --seeds 42 123 456
 ```
 
-### 3. Train the SAC-LSTM Model
+</details>
 
-```bash
-# Run training with Prioritized Experience Replay and R2D2 Burn-In
-python3 src/train/train_lstm.py --train --buffer-type per
+<details>
+<summary><b>🛠️ Detailed Setup, Theory & Troubleshooting Guides (Click to expand)</b></summary>
 
-# Or train with uniform replay buffer (ablation)
-python3 src/train/train_lstm.py --train --buffer-type uniform
-```
+- **[`docs/METHODOLOGY_AND_THEORY.md`](docs/METHODOLOGY_AND_THEORY.md)** — POMDP formulation, R2D2 sequence burn-in math, observation/action normalization, dynamic-aware reward equations, and full per-seed POPGym breakdown tables.
+- **[`docs/SETUP_AND_TROUBLESHOOTING.md`](docs/SETUP_AND_TROUBLESHOOTING.md)** — DevContainer CLI installation (NVM / APT), parallel **Git Worktree** experiment management, deterministic Zenoh/Gazebo port inspection, live `gzclient` GUI attachment, and ROS 2 / X11 troubleshooting.
 
-### 4. Evaluate Checkpoints
-
-```bash
-# Evaluate a trained policy over 50 test episodes
-python3 src/evaluate/testing_model.py \
-    --model_dir ./models/sac_lstm_checkpoints/ \
-    --models best_eval_model_ep_900 \
-    --episodes 50
-```
-
-### 5. Live Metric Tracking
-
-```bash
-tensorboard --logdir ./runs/ --port 6007
-```
-
----
-
-## Automated Benchmarking
-
-The automated benchmark harness allows executing reproducible runs across multiple seeds and algorithms:
-
-```bash
-# List all registered experiments
-python3 -m benchmark.runner --list
-
-# Perform a dry-run (preview commands without executing)
-python3 -m benchmark.runner --dry-run
-
-# Run full evaluation across seeds 42, 123, 456
-python3 -m benchmark.runner --experiments sac_lstm_per sac_mlp --seeds 42 123 456
-
-# Generate a formatted markdown/latex summary report
-python3 -m benchmark.results.generate_report --domain gazebo --format markdown
-```
-
----
-
-## DevContainer & MLOps Infrastructure
-
-### Zenoh Dynamic Port Hashing
-When running multiple containers or automated benchmarks concurrently, default ROS 2 DDS and Gazebo ports will collide. The environment automatically isolates every workspace:
-
-```bash
-# Deterministic hash-based port assignment (in /etc/bash.bashrc)
-ZENOH_PORT=$(( 7448 + $(echo "$WORKSPACE_NAME" | cksum | cut -d' ' -f1) % 100 ))
-GAZEBO_PORT=$(( 11345 + $(echo "$WORKSPACE_NAME" | cksum | cut -d' ' -f1) % 100 ))
-```
-
-### Live Monitoring of Headless Simulations
-Headless training runs `gzserver` without the GUI overhead. To inspect the robot live without disturbing ongoing training:
-
-```bash
-# Attach Gazebo GUI viewer to the running gzserver instance
-export DISPLAY=:1
-gzclient
-```
-*(Closing `gzclient` terminates only the visual viewer; training continues unhindered).*
-
----
-
-## Troubleshooting
-
-### ROS 2 Daemon Reset
-If `ros2 topic list` hangs or reports `xmlrpc.client.Fault: <Fault 1: "!rclpy.ok()">`:
-```bash
-ros2 daemon stop && ros2 daemon start && sleep 2
-ros2 topic list
-```
-
-### Display / X11 Access
-If `gzclient` fails with `could not connect to display`:
-```bash
-# From the host machine:
-xhost +local:docker
-```
-
----
-
-## Citation & Acknowledgments
-
-If you find this work or infrastructure useful, feel free to star the repository and reference it in your robotics projects.
+</details>

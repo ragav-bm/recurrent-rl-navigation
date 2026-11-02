@@ -9,7 +9,11 @@
   <a href="https://github.com/ros2/rmw_zenoh"><img src="https://img.shields.io/badge/RMW-Zenoh_Isolated-blueviolet?style=flat-square" height="18" alt="Zenoh"></a>
 </p>
 
-Mapless navigation among moving obstacles is a **Partially Observable Markov Decision Process (POMDP)**: a single 2D LiDAR scan measures obstacle positions, not velocities. This repository solves continuous mapless navigation without pre-built maps using **Recurrent Soft Actor-Critic (`SAC + LSTM`)**, **R2D2 Sequence Burn-In**, and **Prioritized Experience Replay (`PER`)** in **ROS 2 Humble & Gazebo**.
+Mapless navigation among moving obstacles is a **Partially Observable Markov Decision Process (POMDP)**: a single 2D LiDAR scan measures obstacle positions, not velocities. This repository solves continuous mapless navigation without pre-built maps using **Recurrent Soft Actor-Critic (`SAC + LSTM`)**, **R2D2 Sequence Burn-In**, and **Prioritized Experience Replay (`PER`)** in **ROS 2 Humble & Gazebo** through three core contributions:
+
+1. **Custom PyTorch Recurrent RL Engine (`SAC + LSTM + R2D2 Burn-In + PER`):** Eliminates stale LSTM hidden-state drift during off-policy replay via sequence burn-in (`L_burn = 10`, `L_train = 20`) and a vectorized zero-copy sequence replay buffer (**~18× faster GPU updates**, **+45% higher return** on velocity-masked PO-MuJoCo & POPGym benchmarks).
+2. **Dynamic-Aware Mapless Navigation Control & Reward Shaping:** Fuses `180-D` 2D LiDAR with robot kinematics into a `186-D` POMDP observation space and introduces closing-speed anticipation (`v_close`) + quadratic safety zone shaping, achieving **100% static** and **80% dynamic** zero-shot obstacle avoidance in Gazebo.
+3. **Zero-Conflict Distributed Simulation Infrastructure:** Isolates parallel **ROS 2 Humble + Gazebo** training/evaluation containers on a single multi-GPU workstation via `rmw_zenoh_cpp` localhost-only routing and deterministic workspace-path port hashing (`ROS_DOMAIN_ID`, `GAZEBO_MASTER_URI`, `ZENOH_PORT`).
 
 > **Documentation:** [**Algorithmic Theory & Reward Equations**](docs/METHODOLOGY_AND_THEORY.md) | [**Setup, Worktrees & Troubleshooting**](docs/SETUP_AND_TROUBLESHOOTING.md)
 

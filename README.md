@@ -19,31 +19,7 @@ Mapless navigation among moving obstacles is a **Partially Observable Markov Dec
 
 **Claim:** Combining `SAC + LSTM` with **R2D2 Sequence Burn-In** and **Sequence PER** resolves partial observability where `SAC-MLP` fails, while cutting GPU batch update latency by **~18× (`0.90s → 0.05s`)** and improving continuous-control sample efficiency by **+45%**.
 
-```mermaid
-flowchart LR
-    subgraph EnvThread ["1. Real-Time Interaction (20 Hz)"]
-        Obs["State s_t (186-D)\n+ Prev Action a_{t-1} (2-D)"]
-        EpQ["Thread-Safe Episode Queue\n(Filter: Ep Len >= 48)"]
-        Obs --> EpQ
-    end
-
-    subgraph Buffer ["2. Sequence PER Buffer (400K Cap)"]
-        Store["Contiguous Trajectory Store\n+ Step Hidden States (h_t, c_t)"]
-        Sample["Prioritized Slice (Batch = 64)\nalpha = 0.6 | IS beta: 0.4 -> 1.0"]
-        Store --> Sample
-    end
-
-    subgraph Learner ["3. GPU Learner (SAC-LSTM, 512 Hidden)"]
-        Burn["R2D2 Burn-In (L_burn = 16)\ntorch.no_grad() State Warmup"]
-        BPTT["BPTT Training (L_seq = 32)\nTwin-Q + Squashed Gaussian Actor"]
-        Opt["Auto-Alpha [0.005, 0.03]\nLR = 8e-5 | Grad Clip = 1.6"]
-        Burn -->|"Refreshed (h, c)\n0.90s -> 0.05s"| BPTT --> Opt
-    end
-
-    EpQ --> Store
-    Sample -->|"48-Step Slice"| Burn
-    BPTT -->|"TD-Error |delta|"| Sample
-```
+![SAC-LSTM + R2D2 Burn-In + PER Architecture](docs/media/sac_lstm_burnin.svg)
 
 > 📐 *POMDP formulation & R2D2 sequence burn-in theory:* **[`docs/METHODOLOGY_AND_THEORY.md#1-pomdp-formulation--recurrent-sac-architecture`](docs/METHODOLOGY_AND_THEORY.md#1-pomdp-formulation--recurrent-sac-architecture)**
 
@@ -73,28 +49,7 @@ flowchart LR
 
 **Claim:** A single `SAC + LSTM + PER` policy trained on Stage 4 with **closing-speed anticipation** and **quadratic safety shaping** generalizes zero-shot across static stages (**100% success**) and dynamic moving obstacles (**80% success**).
 
-```mermaid
-flowchart LR
-    subgraph Sensors ["ROS 2 Sensors (20 Hz)"]
-        Scan["/scan: 180 Beams [0.12, 3.5m]\nNorm [0, 1] + Noise (sigma = 0.01)"]
-        Odom["/odom: 6-D Ego & Goal Metrics\n(d_goal, theta_goal, d_min, v, w, init)"]
-    end
-
-    subgraph Policy ["Recurrent Policy (186-D -> 2-D)"]
-        LSTM["SAC-LSTM (512 Units)\n+ Soft-Reset Hidden Carryover"]
-        Act["/cmd_vel Action (dt = 0.05s)\nv in [-0.05, 0.22] m/s\nw in [-2.5, 2.5] rad/s"]
-        LSTM --> Act
-    end
-
-    subgraph Reward ["Dynamic-Aware Reward Shaping"]
-        Term["Terminal\nGoal (<0.35m): +50\nCollision (<0.15m): -50"]
-        Dense["Dense Shaping\nProgress (k=7.0) + Proximity (w=0.51)\nQuadratic Safety (<0.35m, k=-0.51)\nClosing Speed (delta d_min < 0, k=3.09)"]
-    end
-
-    Scan --> LSTM
-    Odom --> LSTM
-    Act -->|"Gazebo Step"| Reward
-```
+![Dynamic-Aware Mapless Navigation Control Loop](docs/media/navigation_loop.svg)
 
 > 📐 *State/action spaces & dynamic-aware reward equations:* **[`docs/METHODOLOGY_AND_THEORY.md#2-observation--action-spaces-srcenvspgrc_env_map_goalpy`](docs/METHODOLOGY_AND_THEORY.md#2-observation--action-spaces-srcenvspgrc_env_map_goalpy)** & **[`#3-dynamic-aware-reward-function`](docs/METHODOLOGY_AND_THEORY.md#3-dynamic-aware-reward-function)**
 
@@ -115,17 +70,7 @@ flowchart LR
 
 **Claim:** Deterministic hash-based port allocation and hardware-aware CUDA setup allow parallel ROS 2 + Gazebo containers (`SAC-LSTM+PER`, `SAC-LSTM`, `SAC-MLP`) to train simultaneously on one workstation with zero topic cross-talk.
 
-```mermaid
-flowchart LR
-    Host["Host Workstation\n(Git Worktrees + Shared /opt/turtlebot3_ws)"]
-    C1["Container: lstm_per_seed42\nZenoh: 7507 | Gazebo: 11397"]
-    C2["Container: lstm_uniform_seed42\nZenoh: 7485 | Gazebo: 11412"]
-    C3["Container: mlp_seed42\nZenoh: 7543 | Gazebo: 11389"]
-    GPU["Auto-CUDA PyTorch (.scripts/install_torch.sh)\nsm_86 (cu121) | sm_89 (cu124) | sm_120 (cu132)"]
-
-    Host --> C1 & C2 & C3
-    GPU -.-> C1 & C2 & C3
-```
+![Isolated Multi-Container Parallel Training Architecture](docs/media/container_isolation.svg)
 
 > 🛠️ *Port isolation formula, parallel Git Worktrees & troubleshooting:* **[`docs/SETUP_AND_TROUBLESHOOTING.md`](docs/SETUP_AND_TROUBLESHOOTING.md)**
 

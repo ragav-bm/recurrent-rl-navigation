@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 145" width="100%">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#475569"/>
+    </marker>
+    <style>
+      .bg { fill: #ffffff; rx: 10; }
+      .box { fill: #f8fafc; stroke: #334155; stroke-width: 1.6; rx: 8; }
+      .box-mem { fill: #faf5ff; stroke: #7e22ce; stroke-width: 1.8; rx: 8; }
+      .box-accent { fill: #f0fdf4; stroke: #15803d; stroke-width: 1.8; rx: 8; }
+      .title { font-family: system-ui, -apple-system, sans-serif; font-size: 13px; font-weight: 700; fill: #0f172a; text-anchor: middle; }
+      .sub { font-family: system-ui, -apple-system, sans-serif; font-size: 11.5px; fill: #334155; text-anchor: middle; }
+      .edge { font-family: system-ui, -apple-system, sans-serif; font-size: 11px; font-weight: 600; fill: #1e293b; text-anchor: middle; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="920" height="145" class="bg"/>
+
+  <!-- Block 1: Interaction -->
+  <rect x="15" y="22" width="180" height="72" class="box"/>
+  <text x="105" y="52" class="title">1. POMDP Interaction</text>
+  <text x="105" y="72" class="sub">State s_t + Prev Action a_{t-1}</text>
+
+  <!-- Arrow 1 -> 2 -->
+  <line x1="195" y1="58" x2="250" y2="58" stroke="#475569" stroke-width="1.8" marker-end="url(#arrow)"/>
+  <text x="222" y="49" class="edge">Episodes</text>
+
+  <!-- Block 2: Sequence PER -->
+  <rect x="250" y="22" width="185" height="72" class="box-mem"/>
+  <text x="342" y="52" class="title">2. Sequence PER Buffer</text>
+  <text x="342" y="72" class="sub">Prioritized 48-Step Slices</text>
+
+  <!-- Arrow 2 -> 3 -->
+  <line x1="435" y1="58" x2="495" y2="58" stroke="#475569" stroke-width="1.8" marker-end="url(#arrow)"/>
+  <text x="465" y="49" class="edge">Batch = 64</text>
+
+  <!-- Block 3: R2D2 Burn-In -->
+  <rect x="495" y="22" width="185" height="72" class="box-mem"/>
+  <text x="587" y="52" class="title">3. R2D2 Burn-In (16 Steps)</text>
+  <text x="587" y="72" class="sub">No-Grad Hidden Warmup</text>
+
+  <!-- Arrow 3 -> 4 -->
+  <line x1="680" y1="58" x2="730" y2="58" stroke="#475569" stroke-width="1.8" marker-end="url(#arrow)"/>
+  <text x="705" y="49" class="edge">h_t, c_t</text>
+
+  <!-- Block 4: SAC-LSTM BPTT -->
+  <rect x="730" y="22" width="175" height="72" class="box-accent"/>
+  <text x="817" y="48" class="title">4. SAC-LSTM (32 Steps)</text>
+  <text x="817" y="66" class="sub">Actor &amp; Twin-Q BPTT</text>
+  <text x="817" y="83" class="sub">18x Faster (0.05s/step)</text>
+
+  <!-- Feedback Arrow 4 -> 2 (TD Error) -->
+  <path d="M 817 94 L 817 125 L 342 125 L 342 97" fill="none" stroke="#475569" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrow)"/>
+  <text x="580" y="118" class="edge">TD-Error Priority Update</text>
+</svg>
